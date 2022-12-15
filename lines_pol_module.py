@@ -18,6 +18,9 @@ Created on Tue Oct  9 15:07:47 2018
 # 
 # 170722 jlh modified for RSS data
 # 82018 agf written in Python
+#
+# Masked off bad pixels and added U error to output file - EPL, 12/13/2022
+#
 #-----------------------------------------------------------------
 
 import astropy.io.fits as fits
@@ -28,6 +31,7 @@ import numpy as np
 from scipy import interpolate
 
 class LinePol():
+
     def __init__(self):
         #-----------------------------------------------------------------
         # Pixel correlation value (different for each detector)
@@ -81,6 +85,8 @@ class LinePol():
         self.meanQLine = 0.0
         self.meanULine = 0.0
         self.meanErrLine = 0.0
+        #add error for U to output file
+        self.meanUErrLine = 0.0
 
         self.blueContinuumCenter = 0.0
         self.redContinuumCenter = 0.0        
@@ -104,6 +110,8 @@ class LinePol():
         self.qLineFlux = 0.0
         self.uLineFlux = 0.0
         self.errLineFlux = 0.0
+        #add error for u to output file
+        self.u_errLineFlux = 0.0
         
         self.qContOutput = 0.0
         self.uContOutput = 0.0
@@ -114,6 +122,8 @@ class LinePol():
         self.qLineOutput = 0.0
         self.uLineOutput = 0.0
         self.errLineOutput = 0.0
+        #add error for u to output file
+        self.u_errLineOutput = 0.0
         self.pLineOutput = 0.0
         self.PALineOutput = 0.0
         
@@ -157,6 +167,8 @@ class LinePol():
         qLine = self.sliceWavelengths(self.q, self.__indexLineMin, self.__indexLineMax)
         uLine = self.sliceWavelengths(self.u, self.__indexLineMin, self.__indexLineMax)
         errLine = self.sliceWavelengths(self.qErr, self.__indexLineMin, self.__indexLineMax)
+        #add error for u to output file
+        u_errLine = self.sliceWavelengths(self.uErr, self.__indexLineMin, self.__indexLineMax)
         
         lineCenter = self.findCenter(waveLine)
         blueContinuumCenter = self.findCenter(waveBlueContinuum)
@@ -178,6 +190,8 @@ class LinePol():
         self.meanQLine = np.mean(qLine)
         self.meanULine = np.mean(uLine)
         self.meanErrLine = self.findErrorAverage(errLine)
+        #add error for u to output file
+        self.meanUErrLine = self.findErrorAverage(u_errLine)
         
         errorWeight = self.findErrorWeight(waveLine, lineCenter, waveBlueContinuum, blueContinuumCenter, waveRedContinuum, redContinuumCenter)
         
@@ -198,6 +212,8 @@ class LinePol():
         self.qLineFlux = self.calcLineFlux(self.meanQLine, self.qMeanTotal, lineWidth)
         self.uLineFlux = self.calcLineFlux(self.meanULine, self.uMeanTotal, lineWidth)
         self.errLineFlux = self.calcLineFluxError(self.meanErrLine, self.errMeanTotal, lineWidth)
+        #add error for u to output file
+        self.u_errLineFlux = self.calcLineFluxError(self.meanUErrLine, self.errMeanTotal, lineWidth)
         
         self.qContOutput = self.qMeanTotal / self.iMeanTotal * 100
         self.uContOutput = self.uMeanTotal / self.iMeanTotal * 100
@@ -208,6 +224,8 @@ class LinePol():
         self.qLineOutput = self.qLineFlux / self.iLineFlux * 100
         self.uLineOutput = self.uLineFlux / self.iLineFlux * 100
         self.errLineOutput = self.errLineFlux / self.iLineFlux * 100
+        #add error for u to output file
+        self.u_errLineOutput = self.u_errLineFlux / self.iLineFlux * 100
         self.pLineOutput = self.calcPolarization(self.qLineOutput, self.uLineOutput)
         self.PALineOutput = self.calcPA(self.qLineOutput, self.uLineOutput)
         
@@ -244,7 +262,7 @@ class LinePol():
             self.__outputTable = None
             return
 
-        lineCenter = self.doLinePolExtraction(self.__folderList[self.__currentFolderIndex])        
+        lineCenter = self.doLinePolExtraction(self.__folderList[self.__currentFolderIndex])
         self.__currentFolderIndex += 1
             
         if self.__currentFolderIndex == (len(self.__folderList)):
@@ -265,11 +283,12 @@ class LinePol():
        
     def constructOutputTable(self) -> None:
         '''Sets up the output astropy table'''
-        self.__outputTable = Table(names = ["Date", "%Q", "%U", "%Err", "%P", "PA"])
+        self.__outputTable = Table(names = ["Date", "%Q", "%U", "%QErr", "%UErr","%P", "PA"])
     
         self.__outputTable["%Q"].format = "{:.5f}"
         self.__outputTable["%U"].format = "{:.5f}"
-        self.__outputTable["%Err"].format = "{:.7f}"
+        self.__outputTable["%QErr"].format = "{:.7f}"
+        self.__outputTable["%UErr"].format = "{:.7f}"
         self.__outputTable["%P"].format = "{:.3f}"
         self.__outputTable["PA"].format = "{:.1f}"
 
@@ -308,22 +327,34 @@ class LinePol():
         #get wavelength axis size
         waves = int(hdul['SCI'].header['NAXIS1'])
 
-       # stokes I, Q, U values
+        #stokes I, Q, U values
         stokesSw = hdul['SCI'].data[:,0,:]
         #stokes errors
         varSw = hdul['VAR'].data[:,0,:]
-        #wavelength axis
-        self.wavelengths = wave0 + deltaWave*np.arange(waves)
+
+        #mask off bad pixels (lines 336 to 355 added/modified by Emma)
+        ok_Sw = hdul['BPM'].data[:, 0, :] == 0 #get bad pixels from fits file
+        inds_0 = np.where(ok_Sw[0,:] == True) #get indices of stokes I data that are not bad
+        inds_1 = np.where(ok_Sw[1, :] == True) #get indices of stokes Q data that are not bad
+        inds_2 = np.where(ok_Sw[2, :] == True) #get indices of stokes U data that are not bad
+        stokesI = stokesSw[0][inds_0] #filter stokes I data on good indices
+        stokesQ = stokesSw[1][inds_1] #filter stokes Q data on good indices
+        stokesU = stokesSw[2][inds_2] #filter stokes U data on good indices
+
+        #wavelength axis - uses new size of wavelength axis after masking off bad pixels
+        self.wavelengths = wave0 + deltaWave*np.arange(len(stokesI))
     
         print("\n"+folder)
-        
-        self.i = stokesSw[0, :]
-        self.q = stokesSw[1, :]#[i > 0]/i[i > 0]
-        self.u = stokesSw[2, :]#[i > 0]/i[i > 0]
-        
-        self.iErr = np.sqrt(varSw[0, :])
-        self.qErr = np.sqrt(varSw[1, :])#[iErr > 0])/i[i > 0]
-        self.uErr = np.sqrt(varSw[2, :])#[iErr > 0])/i[i > 0]
+
+        self.i = stokesI
+        self.q = stokesQ
+        self.u = stokesU
+
+        self.iErr = np.sqrt(varSw[0][inds_0])
+        self.qErr = np.sqrt(varSw[1][inds_1])
+        self.uErr = np.sqrt(varSw[2][inds_2])
+
+
 
     def PARotation(self) -> None:
         '''Rotate the data in a file if need be. Errors do not need to be rotated since they will be essentially the same.'''
@@ -426,7 +457,7 @@ class LinePol():
     
     def addToTable(self) -> None:
         '''Adds a new row to the output table'''
-        newrow = [self.date, self.qLineOutput, self.uLineOutput, self.errLineOutput, self.pLineOutput, self.PALineOutput]
+        newrow = [self.date, self.qLineOutput, self.uLineOutput, self.errLineOutput, self.u_errLineOutput, self.pLineOutput, self.PALineOutput]
         self.__outputTable.add_row(newrow)
     
     def writeTable(self, lineCenter) -> None:
@@ -436,7 +467,7 @@ class LinePol():
     def printOutput(self, folder) -> None:
         '''Prints output to console'''
         self.date = folder[-10:]
-        self.date = self.date.replace("\\", "")
+        self.date = self.date.replace("/", "")
         
         print('Date: ', self.date, '\n')
         print('C1 ', 'C2 ', 'L1 ', 'L2 ', 'C3 ', 'C4')
